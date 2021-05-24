@@ -17,4 +17,9 @@ public class DemoController {
         System.out.println("In DemoController#test");
         demoService.test();
     }
+
+    public DemoService getDemoService() {
+        return demoService;
+    }
+
 }
