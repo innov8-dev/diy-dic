@@ -1,19 +1,13 @@
 package dev.innov8.diy_dic.core;
 
-import dev.innov8.diy_dic.core.annotations.Component;
 import dev.innov8.diy_dic.core.exceptions.*;
-import dev.innov8.diy_dic.core.util.Reflector;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationTargetException;
-import java.net.MalformedURLException;
 import java.util.*;
 import java.util.stream.Collectors;
 
-public class SimpleBeanFactory implements BeanFactory {
-
-    private final Map<String, BeanDefinition> beanDefinitionMap = new Hashtable<>();
-    private final Map<String, Object> createdBeans = new Hashtable<>();
+public class SimpleBeanFactory extends AbstractBeanFactory {
 
     public SimpleBeanFactory(String basePackage) {
         loadBeanDefinitions(basePackage);
@@ -26,25 +20,40 @@ public class SimpleBeanFactory implements BeanFactory {
     }
 
     @Override
-    public <T> T getBean(Class<T> requiredBeanType) {
-        List<Class<?>> matchingBeanTypes = beanDefinitionMap.values()
-                                                            .stream()
-                                                            .map(BeanDefinition::getBeanType)
-                                                            .filter(beanType -> beanType.equals(requiredBeanType))
-                                                            .collect(Collectors.toList());
+    @SuppressWarnings("unchecked")
+    public <T> T getBean(Class<T> requiredBeanType) throws IllegalArgumentException, UnknownBeanNameException, AmbiguousBeanRequestException {
 
-        if (matchingBeanTypes.size() == 0) {
+        if (requiredBeanType == null) {
+            throw new IllegalArgumentException();
+        }
+
+        List<BeanDefinition> matchingBeanDefs = beanDefinitionMap.values()
+                                                                  .stream()
+                                                                  .filter(beanDef -> beanDef.getBeanType().equals(requiredBeanType))
+                                                                  .collect(Collectors.toList());
+
+        if (matchingBeanDefs.size() == 0) {
             throw new UnknownBeanTypeException();
-        } else if (matchingBeanTypes.size() != 1) {
+        } else if (matchingBeanDefs.size() != 1) {
+            List<Class<?>> matchingBeanTypes = matchingBeanDefs.stream()
+                                                               .map(BeanDefinition::getBeanType)
+                                                               .collect(Collectors.toList());
+
             throw new AmbiguousBeanRequestException("type", requiredBeanType.getName(), matchingBeanTypes);
         }
 
-        return null;
+        BeanDefinition matchingBeanDef = matchingBeanDefs.get(0);
+        return (T) getBean(matchingBeanDef.getBeanName(), matchingBeanDef.getBeanType());
     }
 
     @Override
     @SuppressWarnings("unchecked")
-    public <T> T getBean(String beanName, Class<T> requiredBeanType) throws UnknownBeanNameException, BeanTypeMismatchException {
+    public <T> T getBean(String beanName, Class<T> requiredBeanType) throws IllegalArgumentException, UnknownBeanNameException, BeanTypeMismatchException {
+
+        if (beanName == null || beanName.trim().equals("") || requiredBeanType == null) {
+            throw new IllegalArgumentException();
+        }
+
         BeanDefinition beanDef = beanDefinitionMap.get(beanName);
 
         if (beanDef == null) {
@@ -55,35 +64,15 @@ public class SimpleBeanFactory implements BeanFactory {
             throw new BeanTypeMismatchException(beanName, requiredBeanType.getName(), beanDef.getBeanType().getName());
         }
 
-        if (createdBeans.containsKey(beanName)) {
+        if (createdBeans.containsKey(beanName) && beanDef.getBeanScope() == BeanScope.SINGLETON) {
             return (T) createdBeans.get(beanName);
         }
 
-        Class<?>[] dependencyBeanTypes = Arrays.stream(beanDef.getDependencies())
-                                               .map(beanDefinitionMap::get)
-                                               .map(BeanDefinition::getBeanType)
-                                               .toArray(Class<?>[]::new);
+        BeanDefinition[] dependencyBeanDefs = getDependencyBeanDefinitions(beanDef);
+        Class<?>[] dependencyBeanTypes = getDependencyBeanTypes(dependencyBeanDefs);
+        Object[] dependencyBeans = getDependencyBeanInstances(dependencyBeanDefs);
 
-        Object[] dependencyBeans = Arrays.stream(beanDef.getDependencies())
-                                         .map(beanDefinitionMap::get)
-                                         .map(dependencyBeanDef -> {
-                                             if (createdBeans.containsKey(dependencyBeanDef.getBeanName())) {
-                                                 return createdBeans.get(dependencyBeanDef.getBeanName());
-                                             } else {
-                                                 System.out.println(dependencyBeanDef);
-                                                 createdBeans.put(dependencyBeanDef.getBeanName(), getBean(dependencyBeanDef.getBeanName(), dependencyBeanDef.getBeanType()));
-                                                 return createdBeans.get(dependencyBeanDef.getBeanName());                                             }
-                                         })
-                                         .toArray();
-
-        try {
-            Constructor<?> beanConstructor = beanDef.getBeanType().getConstructor(dependencyBeanTypes);
-            T beanInstance = (T) beanConstructor.newInstance(dependencyBeans);
-            createdBeans.put(beanName, beanInstance);
-            return beanInstance;
-        } catch (NoSuchMethodException | InvocationTargetException | InstantiationException | IllegalAccessException e) {
-            throw new BeanCreationException(beanName, e);
-        }
+        return this.createInstance(beanDef, dependencyBeanTypes, dependencyBeans);
 
     }
 
@@ -105,26 +94,6 @@ public class SimpleBeanFactory implements BeanFactory {
     @Override
     public boolean isSingleton(String beanName) {
         return beanDefinitionMap.get(beanName).isSingleton();
-    }
-
-    private void loadBeanDefinitions(String basePackage) {
-        try {
-
-            Reflector.getClassesInPackageWithConstraints(basePackage, aClass -> aClass.isAnnotationPresent(Component.class))
-                     .stream()
-                     .map(SimpleBeanDefinition::new)
-                     .forEach(beanDef -> beanDefinitionMap.put(beanDef.getBeanName(), beanDef));
-
-        } catch (MalformedURLException | ClassNotFoundException e) {
-            throw new BeanDefinitionLoadingException(e);
-        }
-    }
-
-    private void instantiateSingletons() {
-        beanDefinitionMap.values()
-                         .stream()
-                         .filter(BeanDefinition::isSingleton)
-                         .forEach(beanDef -> createdBeans.put(beanDef.getBeanName(), this.getBean(beanDef.getBeanName(), beanDef.getBeanType())));
     }
 
 }
